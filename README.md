@@ -1,0 +1,86 @@
+# gmail-archiver
+
+`gmail-archiver` is a Rust CLI that signs in to Gmail with OAuth, fetches messages from a specific year, and writes them into a zip file as `.eml` files.
+
+## Features
+
+- Signs in with a Google account using the installed-app OAuth flow
+- Filters messages by year with a Gmail query
+- Downloads `raw` messages from the Gmail API
+- Writes `messages/*.eml` plus `manifest.json` into a zip archive
+
+## Prerequisites
+
+- Rust and Cargo
+- A Google Cloud project with the Gmail API enabled
+- A Desktop OAuth client created in Google Cloud
+
+## Google Cloud setup
+
+1. Create a Google Cloud project.
+2. Enable the `Gmail API`.
+3. Configure the OAuth consent screen.
+4. Create an `OAuth client ID` for a Desktop app.
+5. Download the client JSON into this directory as `client_secret.json`.
+
+The tool uses Google's installed-app OAuth flow. On the first run it opens a browser for sign-in, then stores the token for reuse.
+
+If you want to see the expected file shape first, check `client_secret.example.json`. Replace every placeholder value with the real downloaded values, or more simply rename the downloaded file to `client_secret.json`.
+
+Do not use a `Web application` OAuth client here. This tool uses a loopback redirect on `127.0.0.1`, so a web client often fails with `redirect_uri_mismatch`.
+
+## Usage
+
+Basic run:
+
+```powershell
+cargo run -- --year 2024
+```
+
+If you are starting from the sample file:
+
+```powershell
+Copy-Item .\client_secret.example.json .\client_secret.json
+```
+
+Then open `client_secret.json` and replace the placeholder values with the real values from Google Cloud.
+
+Add extra Gmail search terms:
+
+```powershell
+cargo run -- --year 2024 --query "label:work from:boss@example.com"
+```
+
+Customize output and token locations:
+
+```powershell
+cargo run -- --year 2024 `
+  --output .\archives\work-2024.zip `
+  --token-store .\.gmail-archiver\token.json
+```
+
+Exclude spam and trash:
+
+```powershell
+cargo run -- --year 2024 --include-spam-trash false
+```
+
+## Output
+
+- `archives/gmail-<year>.zip`
+- `messages/*.eml` inside the zip
+- `manifest.json` inside the zip
+
+## Notes
+
+- Year filtering uses Gmail `after:` and `before:` search operators.
+- The query uses Unix epoch seconds instead of date strings to avoid Gmail's PST date interpretation.
+- Message listing uses `users.messages.list`.
+- Message download uses `users.messages.get(format=raw)`.
+- The tool requests the `https://www.googleapis.com/auth/gmail.readonly` scope.
+
+## Caveats
+
+- OAuth setup must be completed in Google Cloud before the tool can sign in.
+- Google may show an unverified-app warning while the OAuth client is still in testing.
+- Large mailboxes can take a while to export.
