@@ -1,6 +1,6 @@
 # gmail-archiver
 
-`gmail-archiver` is a Rust CLI that signs in to Gmail with OAuth, fetches messages from a specific year, and writes them into a zip file as `.eml` files.
+`gmail-archiver` is a Rust CLI that signs in to Gmail with OAuth, fetches messages from a specific year or year range, and writes them into zip files as `.eml` files.
 
 ## Features
 
@@ -12,6 +12,7 @@
 - Can move archived messages to Gmail trash with `--remove`
 - Runs Gmail downloads in parallel
 - Shows terminal progress bars for verify, download, trash, and zip phases
+- Can run a year range like `2014..=2020` while keeping work and output separate per year
 
 ## Prerequisites
 
@@ -39,6 +40,12 @@ Basic run:
 
 ```powershell
 cargo run -- --year 2024
+```
+
+Archive a year range:
+
+```powershell
+cargo run -- --year 2014..=2020
 ```
 
 If you are starting from the sample file:
@@ -69,11 +76,26 @@ cargo run -- --year 2024 `
   --token-store .\.gmail-archiver\token.json
 ```
 
+For a year range, `--output` is treated as a directory and the tool writes `gmail-<year>.zip` into it:
+
+```powershell
+cargo run -- --year 2014..=2020 `
+  --output .\archives\range-2014-2020 `
+  --token-store .\.gmail-archiver\token.json
+```
+
 Customize the resumable work directory:
 
 ```powershell
 cargo run -- --year 2024 `
   --work-dir .\.gmail-archiver-work\2024-main
+```
+
+For a year range, `--work-dir` is treated as a parent directory and each year gets its own resumable subdirectory:
+
+```powershell
+cargo run -- --year 2014..=2020 `
+  --work-dir .\.gmail-archiver-work\range-2014-2020
 ```
 
 Exclude spam and trash:
@@ -106,7 +128,9 @@ Run the same command again after `Ctrl+C`, a crash, or a network error. The tool
 ## Notes
 
 - Year filtering uses Gmail `after:` and `before:` search operators.
+- `--year` accepts either a single year like `2024` or an inclusive range like `2014..=2020`.
 - The query uses Unix epoch seconds instead of date strings to avoid Gmail's PST date interpretation.
+- A year range still runs one year at a time, with a separate archive and resume state for each year.
 - Message listing uses `users.messages.list`.
 - Message download uses `users.messages.get(format=raw)`.
 - Downloads run in parallel, with `--concurrency 8` by default.
