@@ -13,7 +13,8 @@ use std::{
 };
 use url::Url;
 
-const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
+pub const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
+pub const GMAIL_MODIFY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
 
 pub fn build_http_client() -> Result<Client> {
     Client::builder()
@@ -30,6 +31,7 @@ pub struct Authenticator {
     client: Client,
     oauth_client: GoogleClientSecret,
     token_store: PathBuf,
+    oauth_scope: String,
     cached_token: Option<SavedToken>,
 }
 
@@ -38,6 +40,7 @@ impl Authenticator {
         client: Client,
         path: impl AsRef<Path>,
         token_store: PathBuf,
+        oauth_scope: impl Into<String>,
     ) -> Result<Self> {
         let raw = fs::read_to_string(path.as_ref()).with_context(|| {
             format!(
@@ -55,6 +58,7 @@ impl Authenticator {
             client,
             oauth_client,
             token_store,
+            oauth_scope: oauth_scope.into(),
             cached_token: None,
         })
     }
@@ -82,16 +86,30 @@ impl Authenticator {
         if self
             .cached_token
             .as_ref()
+            .is_some_and(|token| !token.has_compatible_scope(&self.oauth_scope))
+        {
+            println!(
+                "The saved token does not cover {}, reauthorizing.",
+                self.oauth_scope
+            );
+            self.cached_token = None;
+        }
+
+        if self
+            .cached_token
+            .as_ref()
             .is_some_and(SavedToken::is_currently_valid)
         {
             return Ok(());
         }
 
-        if let Some(refresh_token) = self
-            .cached_token
-            .as_ref()
-            .and_then(|token| token.refresh_token.clone())
-        {
+        if let Some(refresh_token) = self.cached_token.as_ref().and_then(|token| {
+            if token.has_compatible_scope(&self.oauth_scope) {
+                token.refresh_token.clone()
+            } else {
+                None
+            }
+        }) {
             match self.refresh_access_token(&refresh_token).await {
                 Ok(token) => {
                     self.save_token(&token)?;
@@ -157,7 +175,12 @@ impl Authenticator {
         let redirect_uri = format!("http://127.0.0.1:{port}");
         let code_verifier = generate_code_verifier();
         let code_challenge = generate_code_challenge(&code_verifier);
-        let auth_url = build_authorization_url(&self.oauth_client, &redirect_uri, &code_challenge)?;
+        let auth_url = build_authorization_url(
+            &self.oauth_client,
+            &redirect_uri,
+            &code_challenge,
+            &self.oauth_scope,
+        )?;
 
         println!("Opening a browser for Google sign-in.");
         println!("If it does not open, visit this URL manually:\n{auth_url}");
@@ -269,6 +292,19 @@ impl SavedToken {
         self.expires_at
             .is_some_and(|expires_at| expires_at > Utc::now() + Duration::seconds(60))
     }
+
+    fn has_compatible_scope(&self, required_scope: &str) -> bool {
+        let Some(scope_string) = self.scope.as_deref() else {
+            return required_scope == GMAIL_READONLY_SCOPE;
+        };
+
+        let scopes = scope_string.split_whitespace().collect::<Vec<_>>();
+        if scopes.contains(&required_scope) {
+            return true;
+        }
+
+        required_scope == GMAIL_READONLY_SCOPE && scopes.contains(&GMAIL_MODIFY_SCOPE)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -311,6 +347,7 @@ fn build_authorization_url(
     oauth_client: &GoogleClientSecret,
     redirect_uri: &str,
     code_challenge: &str,
+    scope: &str,
 ) -> Result<Url> {
     let mut url = Url::parse(&oauth_client.auth_uri)
         .context("Failed to build the Google OAuth authorization URL")?;
@@ -322,7 +359,7 @@ fn build_authorization_url(
         .append_pair("prompt", "consent")
         .append_pair("redirect_uri", redirect_uri)
         .append_pair("response_type", "code")
-        .append_pair("scope", GMAIL_READONLY_SCOPE);
+        .append_pair("scope", scope);
     Ok(url)
 }
 

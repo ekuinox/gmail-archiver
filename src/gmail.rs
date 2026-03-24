@@ -83,6 +83,15 @@ impl GmailClient {
         Ok(RawMessage { raw })
     }
 
+    pub async fn trash_message(&mut self, message_id: &str) -> Result<()> {
+        let url = Url::parse(&format!(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}/trash"
+        ))
+        .context("Failed to build the Gmail messages.trash URL")?;
+
+        self.post_empty(url).await
+    }
+
     async fn get_json<T>(&mut self, url: Url) -> Result<T>
     where
         T: DeserializeOwned,
@@ -110,6 +119,31 @@ impl GmailClient {
                 .json::<T>()
                 .await
                 .with_context(|| format!("Failed to parse the Gmail API JSON: {url}"));
+        }
+
+        bail!("Gmail API authentication failed. Delete the saved token and try again")
+    }
+
+    async fn post_empty(&mut self, url: Url) -> Result<()> {
+        for attempt in 0..2 {
+            let access_token = self.auth.bearer_token().await?;
+            let response = self
+                .client
+                .post(url.clone())
+                .bearer_auth(access_token)
+                .send()
+                .await
+                .with_context(|| format!("Request to the Gmail API failed: {url}"))?;
+
+            if response.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
+                self.auth.invalidate_access_token();
+                continue;
+            }
+
+            response
+                .error_for_status()
+                .with_context(|| format!("The Gmail API returned an error: {url}"))?;
+            return Ok(());
         }
 
         bail!("Gmail API authentication failed. Delete the saved token and try again")

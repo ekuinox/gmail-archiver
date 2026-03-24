@@ -4,7 +4,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -22,12 +22,14 @@ pub struct ArchiveRequest {
     pub work_dir: PathBuf,
     pub page_size: u32,
     pub include_spam_trash: bool,
+    pub remove_after_stage: bool,
 }
 
 pub struct ArchiveSummary {
     pub message_count: usize,
     pub reused_messages: usize,
     pub downloaded_messages: usize,
+    pub removed_messages: usize,
     pub output_path: PathBuf,
 }
 
@@ -69,8 +71,10 @@ pub async fn write_archive(
 
     let mut reused_messages = 0usize;
     let mut downloaded_messages = 0usize;
+    let mut removed_messages = 0usize;
     for (index, message_id) in state.message_ids.iter().enumerate() {
         let staged_path = staged_message_path(&messages_dir, message_id);
+        let mut is_ready = false;
         if staged_path.exists() {
             match state.message_sha256.get(message_id) {
                 Some(expected_hash) => {
@@ -82,13 +86,14 @@ pub async fn write_archive(
                     })?;
                     if actual_hash == *expected_hash {
                         reused_messages += 1;
-                        continue;
+                        is_ready = true;
                     }
-
-                    println!(
-                        "Hash mismatch for staged message {}, redownloading it.",
-                        staged_path.display()
-                    );
+                    if !is_ready {
+                        println!(
+                            "Hash mismatch for staged message {}, redownloading it.",
+                            staged_path.display()
+                        );
+                    }
                 }
                 None => {
                     println!(
@@ -99,30 +104,54 @@ pub async fn write_archive(
             }
         }
 
-        let message = gmail_client
-            .get_raw_message(message_id)
-            .await
-            .with_context(|| format!("Failed to fetch the message body: {message_id}"))?;
-        let message_hash = sha256_hex(&message.raw);
-        state
-            .message_sha256
-            .insert(message_id.clone(), message_hash.clone());
-        persist_state(&state_path, &state)?;
-        write_atomic(&staged_path, &message.raw).with_context(|| {
-            format!(
-                "Failed to write the staged message file: {}",
-                staged_path.display()
-            )
-        })?;
+        if !is_ready {
+            let message = gmail_client
+                .get_raw_message(message_id)
+                .await
+                .with_context(|| format!("Failed to fetch the message body: {message_id}"))?;
+            let message_hash = sha256_hex(&message.raw);
+            state
+                .message_sha256
+                .insert(message_id.clone(), message_hash.clone());
+            persist_state(&state_path, &state)?;
+            write_atomic(&staged_path, &message.raw).with_context(|| {
+                format!(
+                    "Failed to write the staged message file: {}",
+                    staged_path.display()
+                )
+            })?;
 
-        downloaded_messages += 1;
-        let completed = reused_messages + downloaded_messages;
-        if completed == 1
-            || completed == state.message_ids.len()
-            || completed % 25 == 0
-            || index + 1 == state.message_ids.len()
+            downloaded_messages += 1;
+            let completed = reused_messages + downloaded_messages;
+            if completed == 1
+                || completed == state.message_ids.len()
+                || completed % 25 == 0
+                || index + 1 == state.message_ids.len()
+            {
+                println!("Downloaded {completed} / {}", state.message_ids.len());
+            }
+
+            is_ready = true;
+        }
+
+        if request.remove_after_stage && is_ready && !state.removed_message_ids.contains(message_id)
         {
-            println!("Downloaded {completed} / {}", state.message_ids.len());
+            gmail_client
+                .trash_message(message_id)
+                .await
+                .with_context(|| {
+                    format!("Failed to move the message to Gmail trash: {message_id}")
+                })?;
+            state.removed_message_ids.insert(message_id.clone());
+            persist_state(&state_path, &state)?;
+
+            removed_messages += 1;
+            if removed_messages == 1
+                || removed_messages == state.message_ids.len()
+                || removed_messages % 25 == 0
+            {
+                println!("Trashed {removed_messages} / {}", state.message_ids.len());
+            }
         }
     }
 
@@ -162,6 +191,7 @@ pub async fn write_archive(
         message_count: state.message_ids.len(),
         reused_messages,
         downloaded_messages,
+        removed_messages,
         output_path: request.output_path,
     })
 }
@@ -197,8 +227,10 @@ async fn load_or_create_state(
         start_local: request.start_local.clone(),
         end_local: request.end_local.clone(),
         include_spam_trash: request.include_spam_trash,
+        remove_after_stage: request.remove_after_stage,
         message_ids,
         message_sha256: BTreeMap::new(),
+        removed_message_ids: BTreeSet::new(),
         created_at: Utc::now().to_rfc3339(),
     };
 
@@ -220,6 +252,7 @@ fn validate_state(state: &ArchiveState, request: &ArchiveRequest) -> Result<()> 
         || state.start_local != request.start_local
         || state.end_local != request.end_local
         || state.include_spam_trash != request.include_spam_trash
+        || state.remove_after_stage != request.remove_after_stage
     {
         bail!(
             "The work directory {} belongs to a different export configuration. Use another --work-dir or delete it before retrying.",
@@ -410,9 +443,13 @@ struct ArchiveState {
     start_local: String,
     end_local: String,
     include_spam_trash: bool,
+    #[serde(default)]
+    remove_after_stage: bool,
     message_ids: Vec<String>,
     #[serde(default)]
     message_sha256: BTreeMap<String, String>,
+    #[serde(default)]
+    removed_message_ids: BTreeSet<String>,
     created_at: String,
 }
 

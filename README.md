@@ -9,6 +9,7 @@
 - Downloads `raw` messages from the Gmail API
 - Writes `messages/*.eml` plus `manifest.json` into a zip archive
 - Can resume an interrupted export from a local work directory
+- Can move archived messages to Gmail trash with `--remove`
 
 ## Prerequisites
 
@@ -73,6 +74,12 @@ Exclude spam and trash:
 cargo run -- --year 2024 --include-spam-trash false
 ```
 
+Move messages to Gmail trash after they have been staged:
+
+```powershell
+cargo run -- --year 2024 --remove
+```
+
 Resume after interruption:
 
 ```powershell
@@ -95,8 +102,10 @@ Run the same command again after `Ctrl+C`, a crash, or a network error. The tool
 - Message listing uses `users.messages.list`.
 - Message download uses `users.messages.get(format=raw)`.
 - The tool requests the `https://www.googleapis.com/auth/gmail.readonly` scope.
+- `--remove` upgrades the OAuth scope to `https://www.googleapis.com/auth/gmail.modify` and moves messages to Gmail trash, not permanent deletion.
 - Resume state is stored in `state.json`, and each message is staged as `messages/<message-id>.eml` before the final zip is built.
 - Resuming reuses a staged `.eml` only when its SHA-256 matches the hash saved in `state.json`.
+- When `--remove` is enabled, the tool remembers which staged messages have already been moved to trash and continues that work after resume.
 
 ## Caveats
 

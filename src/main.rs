@@ -68,6 +68,12 @@ struct Args {
         help = "Include spam and trash messages"
     )]
     include_spam_trash: bool,
+
+    #[arg(
+        long,
+        help = "Move each message to Gmail trash after it has been staged successfully"
+    )]
+    remove: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -133,9 +139,14 @@ async fn run() -> Result<()> {
         .output
         .unwrap_or_else(|| PathBuf::from("archives").join(format!("gmail-{}.zip", args.year)));
     let token_store = args.token_store.unwrap_or_else(default_token_store_path);
-    let work_dir = args
-        .work_dir
-        .unwrap_or_else(|| default_work_dir_path(args.year, &query, args.include_spam_trash));
+    let work_dir = args.work_dir.unwrap_or_else(|| {
+        default_work_dir_path(args.year, &query, args.include_spam_trash, args.remove)
+    });
+    let oauth_scope = if args.remove {
+        auth::GMAIL_MODIFY_SCOPE
+    } else {
+        auth::GMAIL_READONLY_SCOPE
+    };
 
     println!(
         "Time range: {} to {}",
@@ -144,12 +155,16 @@ async fn run() -> Result<()> {
     );
     println!("Gmail query: {query}");
     println!("Work directory: {}", work_dir.display());
+    if args.remove {
+        println!("Remove mode: enabled (messages will be moved to Gmail trash after staging)");
+    }
 
     let http_client = auth::build_http_client()?;
     let authenticator = auth::Authenticator::from_client_secret_file(
         http_client.clone(),
         &args.oauth_client,
         token_store,
+        oauth_scope,
     )?;
     let mut gmail_client =
         gmail::GmailClient::new(http_client, authenticator, args.include_spam_trash);
@@ -165,6 +180,7 @@ async fn run() -> Result<()> {
             work_dir,
             page_size,
             include_spam_trash: args.include_spam_trash,
+            remove_after_stage: args.remove,
         },
     )
     .await?;
@@ -172,6 +188,7 @@ async fn run() -> Result<()> {
     println!("Matched messages: {}", summary.message_count);
     println!("Reused staged messages: {}", summary.reused_messages);
     println!("Downloaded messages: {}", summary.downloaded_messages);
+    println!("Trashed messages: {}", summary.removed_messages);
     println!("Wrote archive: {}", summary.output_path.display());
     Ok(())
 }
@@ -184,13 +201,24 @@ fn default_token_store_path() -> PathBuf {
     PathBuf::from(".gmail-archiver").join("token.json")
 }
 
-fn default_work_dir_path(year: i32, query: &str, include_spam_trash: bool) -> PathBuf {
+fn default_work_dir_path(
+    year: i32,
+    query: &str,
+    include_spam_trash: bool,
+    remove_after_stage: bool,
+) -> PathBuf {
     let mut hasher = Sha256::new();
     hasher.update(year.to_string().as_bytes());
     hasher.update(b"\n");
     hasher.update(query.as_bytes());
     hasher.update(b"\n");
     hasher.update(if include_spam_trash {
+        "true".as_bytes()
+    } else {
+        "false".as_bytes()
+    });
+    hasher.update(b"\n");
+    hasher.update(if remove_after_stage {
         "true".as_bytes()
     } else {
         "false".as_bytes()
