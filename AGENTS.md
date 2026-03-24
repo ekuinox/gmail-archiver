@@ -4,8 +4,9 @@
 
 ## コミット規約
 
-- `git commit` を作成するときは、コミットメッセージに次のトレーラーを含めること:
-  `Co-authored-by: Codex <codex@openai.com>`
+- `git commit` を作成するときは、コミットメッセージに、その時点で使用しているコーディングエージェントに対応した `Co-authored-by` トレーラーを含めること。
+- `Co-authored-by` の名前とメールアドレスは、固定値にせず、実際に使用しているエージェントに合わせて選ぶこと。
+- 例: Codex を使っている場合は `Co-authored-by: Codex <codex@openai.com>` を使う。
 - ユーザーから明示的に依頼されない限り、既存コミットの amend は行わないこと。
 
 ## 文書と言語
