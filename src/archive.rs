@@ -106,15 +106,15 @@ pub async fn write_archive(
         )
     })?;
 
-    if let Some(parent) = request.output_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create the output directory: {}",
-                    parent.display()
-                )
-            })?;
-        }
+    if let Some(parent) = request.output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create the output directory: {}",
+                parent.display()
+            )
+        })?;
     }
 
     let temp_output_path = temporary_path(&request.output_path, "part");
@@ -564,11 +564,11 @@ fn staged_message_path(messages_dir: &Path, message_id: &str) -> PathBuf {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
     }
 
     let temp_path = temporary_path(path, "tmp");
