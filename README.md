@@ -10,6 +10,7 @@
 - Writes `messages/*.eml` plus `manifest.json` into a zip archive
 - Can resume an interrupted export from a local work directory
 - Can move archived messages to Gmail trash with `--remove`
+- Runs Gmail downloads in parallel
 
 ## Prerequisites
 
@@ -51,6 +52,12 @@ Add extra Gmail search terms:
 
 ```powershell
 cargo run -- --year 2024 --query "label:work from:boss@example.com"
+```
+
+Tune the request concurrency:
+
+```powershell
+cargo run -- --year 2024 --concurrency 16
 ```
 
 Customize output and token locations:
@@ -101,6 +108,7 @@ Run the same command again after `Ctrl+C`, a crash, or a network error. The tool
 - The query uses Unix epoch seconds instead of date strings to avoid Gmail's PST date interpretation.
 - Message listing uses `users.messages.list`.
 - Message download uses `users.messages.get(format=raw)`.
+- Downloads run in parallel, with `--concurrency 8` by default.
 - The tool requests the `https://www.googleapis.com/auth/gmail.readonly` scope.
 - `--remove` upgrades the OAuth scope to `https://www.googleapis.com/auth/gmail.modify` and moves messages to Gmail trash, not permanent deletion.
 - Resume state is stored in `state.json`, and each message is staged as `messages/<message-id>.eml` before the final zip is built.

@@ -9,6 +9,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
+use tokio::task::JoinSet;
 use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 
 const STATE_VERSION: u32 = 1;
@@ -21,6 +22,7 @@ pub struct ArchiveRequest {
     pub output_path: PathBuf,
     pub work_dir: PathBuf,
     pub page_size: u32,
+    pub concurrency: usize,
     pub include_spam_trash: bool,
     pub remove_after_stage: bool,
 }
@@ -34,7 +36,7 @@ pub struct ArchiveSummary {
 }
 
 pub async fn write_archive(
-    gmail_client: &mut GmailClient,
+    gmail_client: &GmailClient,
     request: ArchiveRequest,
 ) -> Result<ArchiveSummary> {
     fs::create_dir_all(&request.work_dir).with_context(|| {
@@ -69,91 +71,24 @@ pub async fn write_archive(
         println!("No staged messages found, starting a fresh download.");
     }
 
-    let mut reused_messages = 0usize;
-    let mut downloaded_messages = 0usize;
-    let mut removed_messages = 0usize;
-    for (index, message_id) in state.message_ids.iter().enumerate() {
-        let staged_path = staged_message_path(&messages_dir, message_id);
-        let mut is_ready = false;
-        if staged_path.exists() {
-            match state.message_sha256.get(message_id) {
-                Some(expected_hash) => {
-                    let actual_hash = sha256_hex_for_file(&staged_path).with_context(|| {
-                        format!(
-                            "Failed to hash the staged message file: {}",
-                            staged_path.display()
-                        )
-                    })?;
-                    if actual_hash == *expected_hash {
-                        reused_messages += 1;
-                        is_ready = true;
-                    }
-                    if !is_ready {
-                        println!(
-                            "Hash mismatch for staged message {}, redownloading it.",
-                            staged_path.display()
-                        );
-                    }
-                }
-                None => {
-                    println!(
-                        "Staged message {} has no saved hash, redownloading it.",
-                        staged_path.display()
-                    );
-                }
-            }
-        }
-
-        if !is_ready {
-            let message = gmail_client
-                .get_raw_message(message_id)
-                .await
-                .with_context(|| format!("Failed to fetch the message body: {message_id}"))?;
-            let message_hash = sha256_hex(&message.raw);
-            state
-                .message_sha256
-                .insert(message_id.clone(), message_hash.clone());
-            persist_state(&state_path, &state)?;
-            write_atomic(&staged_path, &message.raw).with_context(|| {
-                format!(
-                    "Failed to write the staged message file: {}",
-                    staged_path.display()
-                )
-            })?;
-
-            downloaded_messages += 1;
-            let completed = reused_messages + downloaded_messages;
-            if completed == 1
-                || completed == state.message_ids.len()
-                || completed % 25 == 0
-                || index + 1 == state.message_ids.len()
-            {
-                println!("Downloaded {completed} / {}", state.message_ids.len());
-            }
-
-            is_ready = true;
-        }
-
-        if request.remove_after_stage && is_ready && !state.removed_message_ids.contains(message_id)
-        {
-            gmail_client
-                .trash_message(message_id)
-                .await
-                .with_context(|| {
-                    format!("Failed to move the message to Gmail trash: {message_id}")
-                })?;
-            state.removed_message_ids.insert(message_id.clone());
-            persist_state(&state_path, &state)?;
-
-            removed_messages += 1;
-            if removed_messages == 1
-                || removed_messages == state.message_ids.len()
-                || removed_messages % 25 == 0
-            {
-                println!("Trashed {removed_messages} / {}", state.message_ids.len());
-            }
-        }
-    }
+    let (reused_messages, pending_download_ids) = verify_staged_messages(&state, &messages_dir)?;
+    let downloaded_messages = download_missing_messages(
+        gmail_client,
+        &request,
+        &messages_dir,
+        &state_path,
+        &mut state,
+        pending_download_ids,
+    )
+    .await?;
+    let removed_messages = trash_staged_messages(
+        gmail_client,
+        &request,
+        &state_path,
+        &mut state,
+        &messages_dir,
+    )
+    .await?;
 
     let manifest = ArchiveManifest::from_state(&state);
     let manifest_json =
@@ -197,7 +132,7 @@ pub async fn write_archive(
 }
 
 async fn load_or_create_state(
-    gmail_client: &mut GmailClient,
+    gmail_client: &GmailClient,
     request: &ArchiveRequest,
 ) -> Result<ArchiveState> {
     let state_path = request.work_dir.join("state.json");
@@ -237,6 +172,201 @@ async fn load_or_create_state(
     persist_state(&state_path, &state)?;
     println!("Saved resume state to {}.", state_path.display());
     Ok(state)
+}
+
+fn verify_staged_messages(
+    state: &ArchiveState,
+    messages_dir: &Path,
+) -> Result<(usize, Vec<String>)> {
+    let mut reused_messages = 0usize;
+    let mut pending_download_ids = Vec::new();
+
+    for message_id in &state.message_ids {
+        let staged_path = staged_message_path(messages_dir, message_id);
+        if !staged_path.exists() {
+            pending_download_ids.push(message_id.clone());
+            continue;
+        }
+
+        match state.message_sha256.get(message_id) {
+            Some(expected_hash) => {
+                let actual_hash = sha256_hex_for_file(&staged_path).with_context(|| {
+                    format!(
+                        "Failed to hash the staged message file: {}",
+                        staged_path.display()
+                    )
+                })?;
+                if actual_hash == *expected_hash {
+                    reused_messages += 1;
+                } else {
+                    println!(
+                        "Hash mismatch for staged message {}, redownloading it.",
+                        staged_path.display()
+                    );
+                    pending_download_ids.push(message_id.clone());
+                }
+            }
+            None => {
+                println!(
+                    "Staged message {} has no saved hash, redownloading it.",
+                    staged_path.display()
+                );
+                pending_download_ids.push(message_id.clone());
+            }
+        }
+    }
+
+    Ok((reused_messages, pending_download_ids))
+}
+
+async fn download_missing_messages(
+    gmail_client: &GmailClient,
+    request: &ArchiveRequest,
+    messages_dir: &Path,
+    state_path: &Path,
+    state: &mut ArchiveState,
+    pending_download_ids: Vec<String>,
+) -> Result<usize> {
+    if pending_download_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut downloaded_messages = 0usize;
+    let mut in_flight = JoinSet::new();
+    let mut pending_iter = pending_download_ids.into_iter();
+
+    while in_flight.len() < request.concurrency {
+        if let Some(message_id) = pending_iter.next() {
+            spawn_download_task(&mut in_flight, gmail_client.clone(), message_id);
+        } else {
+            break;
+        }
+    }
+
+    while let Some(join_result) = in_flight.join_next().await {
+        let downloaded = join_result
+            .context("A Gmail download task panicked")?
+            .with_context(|| "A Gmail download task failed")?;
+
+        let staged_path = staged_message_path(messages_dir, &downloaded.message_id);
+        state
+            .message_sha256
+            .insert(downloaded.message_id.clone(), downloaded.sha256);
+        persist_state(state_path, state)?;
+        write_atomic(&staged_path, &downloaded.raw).with_context(|| {
+            format!(
+                "Failed to write the staged message file: {}",
+                staged_path.display()
+            )
+        })?;
+
+        downloaded_messages += 1;
+        if downloaded_messages == 1
+            || downloaded_messages == state.message_ids.len()
+            || downloaded_messages % 25 == 0
+        {
+            println!("Downloaded {downloaded_messages} new messages");
+        }
+
+        if let Some(message_id) = pending_iter.next() {
+            spawn_download_task(&mut in_flight, gmail_client.clone(), message_id);
+        }
+    }
+
+    Ok(downloaded_messages)
+}
+
+async fn trash_staged_messages(
+    gmail_client: &GmailClient,
+    request: &ArchiveRequest,
+    state_path: &Path,
+    state: &mut ArchiveState,
+    messages_dir: &Path,
+) -> Result<usize> {
+    if !request.remove_after_stage {
+        return Ok(0);
+    }
+
+    let pending_remove_ids = state
+        .message_ids
+        .iter()
+        .filter(|message_id| !state.removed_message_ids.contains(*message_id))
+        .filter(|message_id| staged_message_path(messages_dir, message_id).exists())
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if pending_remove_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut removed_messages = 0usize;
+    let mut in_flight = JoinSet::new();
+    let mut pending_iter = pending_remove_ids.into_iter();
+
+    while in_flight.len() < request.concurrency {
+        if let Some(message_id) = pending_iter.next() {
+            spawn_trash_task(&mut in_flight, gmail_client.clone(), message_id);
+        } else {
+            break;
+        }
+    }
+
+    while let Some(join_result) = in_flight.join_next().await {
+        let message_id = join_result
+            .context("A Gmail trash task panicked")?
+            .with_context(|| "A Gmail trash task failed")?;
+
+        state.removed_message_ids.insert(message_id);
+        persist_state(state_path, state)?;
+
+        removed_messages += 1;
+        if removed_messages == 1
+            || removed_messages == state.message_ids.len()
+            || removed_messages % 25 == 0
+        {
+            println!("Trashed {removed_messages} messages");
+        }
+
+        if let Some(message_id) = pending_iter.next() {
+            spawn_trash_task(&mut in_flight, gmail_client.clone(), message_id);
+        }
+    }
+
+    Ok(removed_messages)
+}
+
+fn spawn_download_task(
+    join_set: &mut JoinSet<Result<DownloadedMessage>>,
+    gmail_client: GmailClient,
+    message_id: String,
+) {
+    join_set.spawn(async move {
+        let message = gmail_client
+            .get_raw_message(&message_id)
+            .await
+            .with_context(|| format!("Failed to fetch the message body: {message_id}"))?;
+        let sha256 = sha256_hex(&message.raw);
+
+        Ok(DownloadedMessage {
+            message_id,
+            raw: message.raw,
+            sha256,
+        })
+    });
+}
+
+fn spawn_trash_task(
+    join_set: &mut JoinSet<Result<String>>,
+    gmail_client: GmailClient,
+    message_id: String,
+) {
+    join_set.spawn(async move {
+        gmail_client
+            .trash_message(&message_id)
+            .await
+            .with_context(|| format!("Failed to move the message to Gmail trash: {message_id}"))?;
+        Ok(message_id)
+    });
 }
 
 fn validate_state(state: &ArchiveState, request: &ArchiveRequest) -> Result<()> {
@@ -487,4 +617,10 @@ impl ArchiveManifest {
 struct DateRange {
     start_local: String,
     end_local: String,
+}
+
+struct DownloadedMessage {
+    message_id: String,
+    raw: Vec<u8>,
+    sha256: String,
 }

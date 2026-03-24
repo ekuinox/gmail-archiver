@@ -56,6 +56,13 @@ struct Args {
 
     #[arg(
         long,
+        default_value_t = 8,
+        help = "Concurrent Gmail requests for download and optional removal"
+    )]
+    concurrency: usize,
+
+    #[arg(
+        long,
         value_name = "QUERY",
         help = "Extra Gmail search query, for example: label:work from:boss@example.com"
     )]
@@ -133,6 +140,7 @@ async fn run() -> Result<()> {
     }
 
     let page_size = args.page_size.clamp(1, 500);
+    let concurrency = args.concurrency.max(1);
     let year_window = YearWindow::for_year(args.year)?;
     let query = year_window.build_query(args.query.as_deref());
     let output_path = args
@@ -155,6 +163,7 @@ async fn run() -> Result<()> {
     );
     println!("Gmail query: {query}");
     println!("Work directory: {}", work_dir.display());
+    println!("Concurrency: {concurrency}");
     if args.remove {
         println!("Remove mode: enabled (messages will be moved to Gmail trash after staging)");
     }
@@ -166,11 +175,10 @@ async fn run() -> Result<()> {
         token_store,
         oauth_scope,
     )?;
-    let mut gmail_client =
-        gmail::GmailClient::new(http_client, authenticator, args.include_spam_trash);
+    let gmail_client = gmail::GmailClient::new(http_client, authenticator, args.include_spam_trash);
 
     let summary = archive::write_archive(
-        &mut gmail_client,
+        &gmail_client,
         archive::ArchiveRequest {
             year: args.year,
             query,
@@ -179,6 +187,7 @@ async fn run() -> Result<()> {
             output_path,
             work_dir,
             page_size,
+            concurrency,
             include_spam_trash: args.include_spam_trash,
             remove_after_stage: args.remove,
         },
