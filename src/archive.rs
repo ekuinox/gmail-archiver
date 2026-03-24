@@ -1,12 +1,13 @@
 use crate::gmail::GmailClient;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use indicatif::{ProgressBar as IndicatifProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::{self, IsTerminal, Read, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 use tokio::task::JoinSet;
@@ -673,115 +674,47 @@ enum TrashOutcome {
 }
 
 struct ProgressBar {
-    label: &'static str,
-    total: usize,
-    current: usize,
-    interactive: bool,
-    finished: bool,
-    last_render_len: usize,
+    bar: IndicatifProgressBar,
 }
 
 impl ProgressBar {
     fn new(label: &'static str, total: usize) -> Self {
-        let mut progress = Self {
-            label,
-            total,
-            current: 0,
-            interactive: io::stderr().is_terminal(),
-            finished: false,
-            last_render_len: 0,
-        };
-        progress.draw();
-        progress
+        if total == 0 {
+            return Self {
+                bar: IndicatifProgressBar::hidden(),
+            };
+        }
+
+        let bar = IndicatifProgressBar::with_draw_target(
+            Some(total as u64),
+            ProgressDrawTarget::stderr(),
+        );
+        bar.set_style(progress_style());
+        bar.set_message(label.to_owned());
+        Self { bar }
     }
 
     fn inc(&mut self, delta: usize) {
-        self.current = self.current.saturating_add(delta).min(self.total);
-        self.draw();
+        self.bar.inc(delta as u64);
     }
 
     fn log_line(&mut self, message: &str) {
-        if self.interactive {
-            self.clear();
-        }
-        eprintln!("{message}");
-        if self.interactive {
-            self.draw();
-        }
+        self.bar.println(message);
     }
 
     fn finish(&mut self) {
-        if self.finished {
-            return;
-        }
-
-        self.current = self.total;
-        if self.interactive {
-            self.draw();
-            eprintln!();
-        } else if self.total > 0 {
-            eprintln!("{} {}/{}", self.label, self.current, self.total);
-        }
-        self.finished = true;
+        self.bar.finish_and_clear();
     }
+}
 
-    fn draw(&mut self) {
-        if self.finished || self.total == 0 {
-            return;
-        }
-
-        if self.interactive {
-            let line = self.render_line();
-            self.last_render_len = line.len();
-            eprint!("\r{line}");
-            let _ = io::stderr().flush();
-            return;
-        }
-
-        if self.current == 1 || self.current == self.total || self.current % 25 == 0 {
-            eprintln!("{} {}/{}", self.label, self.current, self.total);
-        }
-    }
-
-    fn clear(&mut self) {
-        if !self.interactive || self.last_render_len == 0 {
-            return;
-        }
-
-        eprint!("\r{:<width$}\r", "", width = self.last_render_len);
-        let _ = io::stderr().flush();
-    }
-
-    fn render_line(&self) -> String {
-        const BAR_WIDTH: usize = 28;
-
-        let filled = if self.total == 0 {
-            BAR_WIDTH
-        } else {
-            self.current.saturating_mul(BAR_WIDTH) / self.total
-        };
-        let percent = if self.total == 0 {
-            100
-        } else {
-            self.current.saturating_mul(100) / self.total
-        };
-
-        format!(
-            "{:<8} [{}{}] {}/{} {:>3}%",
-            self.label,
-            "#".repeat(filled),
-            "-".repeat(BAR_WIDTH - filled),
-            self.current,
-            self.total,
-            percent
-        )
-    }
+fn progress_style() -> ProgressStyle {
+    ProgressStyle::with_template("{msg:8} [{bar:28.cyan/blue}] {pos}/{len} {percent:>3}%")
+        .expect("progress bar template should be valid")
+        .progress_chars("=>-")
 }
 
 impl Drop for ProgressBar {
     fn drop(&mut self) {
-        if self.interactive && !self.finished && self.last_render_len > 0 {
-            eprintln!();
-        }
+        self.bar.finish_and_clear();
     }
 }
