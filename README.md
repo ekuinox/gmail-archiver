@@ -1,74 +1,74 @@
 # gmail-archiver
 
-`gmail-archiver` is a Rust CLI that signs in to Gmail with OAuth, fetches messages from a specific year or year range, and writes them into zip files as `.eml` files.
+`gmail-archiver` は、OAuth で Gmail にログインし、指定した年または年の範囲に一致するメールを取得して、`.eml` を含む zip ファイルとして保存する Rust 製 CLI です。
 
-## Features
+## 主な機能
 
-- Signs in with a Google account using the installed-app OAuth flow
-- Filters messages by year with a Gmail query
-- Downloads `raw` messages from the Gmail API
-- Writes `messages/*.eml` plus `manifest.json` into a zip archive
-- Can resume an interrupted export from a local work directory
-- Can move archived messages to Gmail trash with `--remove`
-- Runs Gmail downloads in parallel
-- Shows terminal progress bars for verify, download, trash, and zip phases
-- Can run a year range like `2014..=2020` while keeping work and output separate per year
+- Google アカウントで installed-app OAuth フローを使ってサインインできる
+- Gmail クエリで年ごとにメールを絞り込める
+- Gmail API から `raw` メッセージを取得できる
+- `messages/*.eml` と `manifest.json` を zip にまとめて保存できる
+- ローカルの作業ディレクトリを使って中断から再開できる
+- `--remove` でアーカイブ後に Gmail のゴミ箱へ移動できる
+- Gmail ダウンロードを並列実行できる
+- verify、download、trash、zip 各フェーズでターミナルのプログレスバーを表示できる
+- `2014..=2020` のような年範囲を指定しても、年ごとに出力と再開状態を分けて処理できる
 
-## Prerequisites
+## 事前準備
 
-- Rust and Cargo
-- A Google Cloud project with the Gmail API enabled
-- A Desktop OAuth client created in Google Cloud
+- Rust と Cargo
+- Gmail API を有効化した Google Cloud プロジェクト
+- Google Cloud で作成した Desktop OAuth クライアント
 
-## Google Cloud setup
+## Google Cloud の設定
 
-1. Create a Google Cloud project.
-2. Enable the `Gmail API`.
-3. Configure the OAuth consent screen.
-4. Create an `OAuth client ID` for a Desktop app.
-5. Download the client JSON into this directory as `client_secret.json`.
+1. Google Cloud プロジェクトを作成します。
+2. `Gmail API` を有効化します。
+3. OAuth 同意画面を設定します。
+4. Desktop app 用の `OAuth client ID` を作成します。
+5. ダウンロードした client JSON を、このディレクトリに `client_secret.json` として置きます。
 
-The tool uses Google's installed-app OAuth flow. On the first run it opens a browser for sign-in, then stores the token for reuse.
+このツールは Google の installed-app OAuth フローを使います。初回実行時にはブラウザでサインインを求められ、取得したトークンは再利用できるよう保存されます。
 
-If you want to see the expected file shape first, check `client_secret.example.json`. Replace every placeholder value with the real downloaded values, or more simply rename the downloaded file to `client_secret.json`.
+ファイルの形を先に確認したい場合は `client_secret.example.json` を見てください。プレースホルダを実際の値に置き換えるか、Google Cloud からダウンロードした JSON をそのまま `client_secret.json` にリネームするのが簡単です。
 
-Do not use a `Web application` OAuth client here. This tool uses a loopback redirect on `127.0.0.1`, so a web client often fails with `redirect_uri_mismatch`.
+ここでは `Web application` の OAuth クライアントは使わないでください。このツールは `127.0.0.1` のループバック redirect を使うため、web クライアントだと `redirect_uri_mismatch` になりやすいです。
 
-## Usage
+## 使い方
 
-Basic run:
+基本実行:
 
 ```powershell
 cargo run -- --year 2024
 ```
 
-Archive a year range:
+年範囲をまとめてアーカイブ:
 
 ```powershell
 cargo run -- --year 2014..=2020
 ```
 
-If you are starting from the sample file:
+サンプルファイルから始める場合:
 
 ```powershell
 Copy-Item .\client_secret.example.json .\client_secret.json
 ```
 
-Then open `client_secret.json` and replace the placeholder values with the real values from Google Cloud.
+その後 `client_secret.json` を開き、Google Cloud から取得した実際の値でプレースホルダを置き換えてください。
 
-Add extra Gmail search terms:
+追加の Gmail 検索条件を付ける:
 
 ```powershell
 cargo run -- --year 2024 --query "label:work from:boss@example.com"
 ```
 
-Tune the request concurrency:
+並列数を調整する:
 
 ```powershell
 cargo run -- --year 2024 --concurrency 16
 ```
 
-Customize output and token locations:
+出力先とトークン保存先を指定する:
 
 ```powershell
 cargo run -- --year 2024 `
@@ -76,7 +76,7 @@ cargo run -- --year 2024 `
   --token-store .\.gmail-archiver\token.json
 ```
 
-For a year range, `--output` is treated as a directory and the tool writes `gmail-<year>.zip` into it:
+年範囲を指定した場合、`--output` はディレクトリとして扱われ、その中に `gmail-<year>.zip` が出力されます:
 
 ```powershell
 cargo run -- --year 2014..=2020 `
@@ -84,68 +84,68 @@ cargo run -- --year 2014..=2020 `
   --token-store .\.gmail-archiver\token.json
 ```
 
-Customize the resumable work directory:
+再開用の作業ディレクトリを指定する:
 
 ```powershell
 cargo run -- --year 2024 `
   --work-dir .\.gmail-archiver-work\2024-main
 ```
 
-For a year range, `--work-dir` is treated as a parent directory and each year gets its own resumable subdirectory:
+年範囲を指定した場合、`--work-dir` は親ディレクトリとして扱われ、各年ごとに再開用サブディレクトリが作られます:
 
 ```powershell
 cargo run -- --year 2014..=2020 `
   --work-dir .\.gmail-archiver-work\range-2014-2020
 ```
 
-Exclude spam and trash:
+spam と trash を除外する:
 
 ```powershell
 cargo run -- --year 2024 --include-spam-trash false
 ```
 
-Move messages to Gmail trash after they have been staged:
+ステージ完了後に Gmail のゴミ箱へ移動する:
 
 ```powershell
 cargo run -- --year 2024 --remove
 ```
 
-Resume after interruption:
+中断後に再開する:
 
 ```powershell
 cargo run -- --year 2024
 ```
 
-Run the same command again after `Ctrl+C`, a crash, or a network error. The tool keeps staged `.eml` files and continues from the remaining messages.
+`Ctrl+C`、クラッシュ、ネットワークエラーなどで止まったあとに同じコマンドを再実行すると、既存の `.eml` を再利用しながら残りの処理を続行します。
 
-## Output
+## 出力内容
 
 - `archives/gmail-<year>.zip`
-- `messages/*.eml` inside the zip
-- `manifest.json` inside the zip
-- `.gmail-archiver-work/<year>-<hash>/` while the export is in progress or available for resume
+- zip 内の `messages/*.eml`
+- zip 内の `manifest.json`
+- 実行中または再開用に使う `.gmail-archiver-work/<year>-<hash>/`
 
-## Notes
+## 補足
 
-- Year filtering uses Gmail `after:` and `before:` search operators.
-- `--year` accepts either a single year like `2024` or an inclusive range like `2014..=2020`.
-- The query uses Unix epoch seconds instead of date strings to avoid Gmail's PST date interpretation.
-- A year range still runs one year at a time, with a separate archive and resume state for each year.
-- Message listing uses `users.messages.list`.
-- Message download uses `users.messages.get(format=raw)`.
-- Downloads run in parallel, with `--concurrency 8` by default.
-- Resume verification of staged `.eml` files also runs in parallel, using the same `--concurrency` limit.
-- Transient Gmail API failures such as HTTP 429 and 5xx are retried automatically with backoff.
-- The tool requests the `https://www.googleapis.com/auth/gmail.readonly` scope.
-- `--remove` upgrades the OAuth scope to `https://www.googleapis.com/auth/gmail.modify` and moves messages to Gmail trash, not permanent deletion.
-- Resume state is stored in `state.json`, and each message is staged as `messages/<message-id>.eml` before the final zip is built.
-- Resuming reuses a staged `.eml` only when its SHA-256 matches the hash saved in `state.json`.
-- When `--remove` is enabled, the tool remembers which staged messages have already been moved to trash and continues that work after resume.
-- Before calling the Gmail trash API, the tool checks whether a message already has the `TRASH` label and skips it when possible.
-- If a Gmail trash request fails, the tool logs the error, skips that message for now, and continues the archive. The message is retried on the next run because it is not marked as removed in `state.json`.
+- 年の絞り込みには Gmail の `after:` と `before:` 検索演算子を使います。
+- `--year` は `2024` のような単年指定と、`2014..=2020` のような inclusive range 指定の両方に対応しています。
+- Gmail の日付解釈を PST 基準に引っ張られないよう、クエリでは日付文字列ではなく Unix epoch 秒を使っています。
+- 年範囲指定でも処理は 1 年ずつ実行し、出力ファイルと再開状態は年ごとに分離されます。
+- メール一覧取得には `users.messages.list` を使います。
+- メール本文の取得には `users.messages.get(format=raw)` を使います。
+- ダウンロードは既定で `--concurrency 8` の並列実行です。
+- 中断再開時の staged `.eml` 検証も、同じ `--concurrency` 上限で並列実行されます。
+- `HTTP 429` や `5xx` のような一時的な Gmail API エラーは、自動でバックオフ再試行します。
+- 通常は `https://www.googleapis.com/auth/gmail.readonly` スコープを使います。
+- `--remove` を付けると `https://www.googleapis.com/auth/gmail.modify` スコープに切り替わり、完全削除ではなく Gmail のゴミ箱へ移動します。
+- 再開状態は `state.json` に保存され、各メッセージは最終 zip 作成前に `messages/<message-id>.eml` としてステージされます。
+- staged `.eml` を再利用するのは、`state.json` に保存された SHA-256 と一致した場合だけです。
+- `--remove` 有効時は、すでにゴミ箱へ移動済みのメッセージ状態も記録し、再開時に続きから処理できます。
+- Gmail の trash API を呼ぶ前に `TRASH` ラベルを確認し、すでにゴミ箱にあるメールはできるだけスキップします。
+- Gmail の trash が失敗したメールはログを出していったんスキップし、`state.json` 上は未完了のまま残すので次回再試行されます。
 
-## Caveats
+## 注意事項
 
-- OAuth setup must be completed in Google Cloud before the tool can sign in.
-- Google may show an unverified-app warning while the OAuth client is still in testing.
-- Large mailboxes can take a while to export.
+- Google Cloud 側の OAuth 設定が完了していないとサインインできません。
+- OAuth クライアントがまだ testing 状態の場合、Google から未確認アプリの警告が表示されることがあります。
+- メールボックスが大きいと、エクスポートに時間がかかることがあります。
