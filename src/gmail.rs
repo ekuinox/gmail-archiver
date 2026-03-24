@@ -1,12 +1,20 @@
 use crate::auth::Authenticator;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE};
-use reqwest::{Client, StatusCode};
+use reqwest::{
+    Client, StatusCode,
+    header::{HeaderMap, RETRY_AFTER},
+};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::time::{Duration, sleep};
 use url::Url;
+
+const MAX_TRANSIENT_RETRIES: usize = 5;
+const INITIAL_RETRY_DELAY_MS: u64 = 500;
+const MAX_RETRY_DELAY_MS: u64 = 8_000;
 
 #[derive(Clone)]
 pub struct GmailClient {
@@ -110,18 +118,42 @@ impl GmailClient {
     where
         T: DeserializeOwned,
     {
-        for attempt in 0..2 {
+        let mut refreshed_access_token = false;
+        let mut transient_retries = 0usize;
+
+        loop {
             let access_token = self.bearer_token().await?;
-            let response = self
+            let response = match self
                 .client
                 .get(url.clone())
                 .bearer_auth(access_token)
                 .send()
                 .await
-                .with_context(|| format!("Request to the Gmail API failed: {url}"))?;
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    if should_retry_transport_error(&error)
+                        && transient_retries < MAX_TRANSIENT_RETRIES
+                    {
+                        transient_retries += 1;
+                        sleep(retry_delay(transient_retries, None)).await;
+                        continue;
+                    }
 
-            if response.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
+                    return Err(error)
+                        .with_context(|| format!("Request to the Gmail API failed: {url}"));
+                }
+            };
+
+            if response.status() == StatusCode::UNAUTHORIZED && !refreshed_access_token {
                 self.invalidate_access_token().await;
+                refreshed_access_token = true;
+                continue;
+            }
+
+            if should_retry_status(response.status()) && transient_retries < MAX_TRANSIENT_RETRIES {
+                transient_retries += 1;
+                sleep(retry_delay(transient_retries, Some(response.headers()))).await;
                 continue;
             }
 
@@ -134,23 +166,45 @@ impl GmailClient {
                 .await
                 .with_context(|| format!("Failed to parse the Gmail API JSON: {url}"));
         }
-
-        bail!("Gmail API authentication failed. Delete the saved token and try again")
     }
 
     async fn post_empty(&self, url: Url) -> Result<()> {
-        for attempt in 0..2 {
+        let mut refreshed_access_token = false;
+        let mut transient_retries = 0usize;
+
+        loop {
             let access_token = self.bearer_token().await?;
-            let response = self
+            let response = match self
                 .client
                 .post(url.clone())
                 .bearer_auth(access_token)
                 .send()
                 .await
-                .with_context(|| format!("Request to the Gmail API failed: {url}"))?;
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    if should_retry_transport_error(&error)
+                        && transient_retries < MAX_TRANSIENT_RETRIES
+                    {
+                        transient_retries += 1;
+                        sleep(retry_delay(transient_retries, None)).await;
+                        continue;
+                    }
 
-            if response.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
+                    return Err(error)
+                        .with_context(|| format!("Request to the Gmail API failed: {url}"));
+                }
+            };
+
+            if response.status() == StatusCode::UNAUTHORIZED && !refreshed_access_token {
                 self.invalidate_access_token().await;
+                refreshed_access_token = true;
+                continue;
+            }
+
+            if should_retry_status(response.status()) && transient_retries < MAX_TRANSIENT_RETRIES {
+                transient_retries += 1;
+                sleep(retry_delay(transient_retries, Some(response.headers()))).await;
                 continue;
             }
 
@@ -159,8 +213,6 @@ impl GmailClient {
                 .with_context(|| format!("The Gmail API returned an error: {url}"))?;
             return Ok(());
         }
-
-        bail!("Gmail API authentication failed. Delete the saved token and try again")
     }
 
     async fn bearer_token(&self) -> Result<String> {
@@ -205,6 +257,31 @@ struct MinimalMessageResponse {
 
 fn bool_as_google(value: bool) -> &'static str {
     if value { "true" } else { "false" }
+}
+
+fn should_retry_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn should_retry_transport_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect()
+}
+
+fn retry_delay(attempt: usize, headers: Option<&HeaderMap>) -> Duration {
+    retry_after_delay(headers).unwrap_or_else(|| exponential_backoff(attempt))
+}
+
+fn retry_after_delay(headers: Option<&HeaderMap>) -> Option<Duration> {
+    let headers = headers?;
+    let retry_after = headers.get(RETRY_AFTER)?;
+    let seconds = retry_after.to_str().ok()?.parse::<u64>().ok()?;
+    Some(Duration::from_secs(seconds))
+}
+
+fn exponential_backoff(attempt: usize) -> Duration {
+    let shift = attempt.saturating_sub(1).min(6) as u32;
+    let multiplier = 1_u64 << shift;
+    Duration::from_millis((INITIAL_RETRY_DELAY_MS * multiplier).min(MAX_RETRY_DELAY_MS))
 }
 
 fn decode_gmail_base64(encoded: &str) -> Result<Vec<u8>> {
