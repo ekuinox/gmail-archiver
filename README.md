@@ -11,6 +11,7 @@
 - Can resume an interrupted export from a local work directory
 - Can move archived messages to Gmail trash with `--remove`
 - Runs Gmail downloads in parallel
+- Shows terminal progress bars for verify, download, trash, and zip phases
 
 ## Prerequisites
 

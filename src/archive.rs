@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::{Read, Write},
+    io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
 };
 use tokio::task::JoinSet;
@@ -186,11 +186,13 @@ fn verify_staged_messages(
 ) -> Result<(usize, Vec<String>)> {
     let mut reused_messages = 0usize;
     let mut pending_download_ids = Vec::new();
+    let mut progress = ProgressBar::new("Verify", state.message_ids.len());
 
     for message_id in &state.message_ids {
         let staged_path = staged_message_path(messages_dir, message_id);
         if !staged_path.exists() {
             pending_download_ids.push(message_id.clone());
+            progress.inc(1);
             continue;
         }
 
@@ -205,23 +207,26 @@ fn verify_staged_messages(
                 if actual_hash == *expected_hash {
                     reused_messages += 1;
                 } else {
-                    println!(
+                    progress.log_line(&format!(
                         "Hash mismatch for staged message {}, redownloading it.",
                         staged_path.display()
-                    );
+                    ));
                     pending_download_ids.push(message_id.clone());
                 }
             }
             None => {
-                println!(
+                progress.log_line(&format!(
                     "Staged message {} has no saved hash, redownloading it.",
                     staged_path.display()
-                );
+                ));
                 pending_download_ids.push(message_id.clone());
             }
         }
+
+        progress.inc(1);
     }
 
+    progress.finish();
     Ok((reused_messages, pending_download_ids))
 }
 
@@ -237,7 +242,9 @@ async fn download_missing_messages(
         return Ok(0);
     }
 
+    let total_downloads = pending_download_ids.len();
     let mut downloaded_messages = 0usize;
+    let mut progress = ProgressBar::new("Download", total_downloads);
     let mut in_flight = JoinSet::new();
     let mut pending_iter = pending_download_ids.into_iter();
 
@@ -267,18 +274,14 @@ async fn download_missing_messages(
         })?;
 
         downloaded_messages += 1;
-        if downloaded_messages == 1
-            || downloaded_messages == state.message_ids.len()
-            || downloaded_messages % 25 == 0
-        {
-            println!("Downloaded {downloaded_messages} new messages");
-        }
+        progress.inc(1);
 
         if let Some(message_id) = pending_iter.next() {
             spawn_download_task(&mut in_flight, gmail_client.clone(), message_id);
         }
     }
 
+    progress.finish();
     Ok(downloaded_messages)
 }
 
@@ -306,9 +309,11 @@ async fn trash_staged_messages(
         return Ok((0, 0, 0));
     }
 
+    let total_removals = pending_remove_ids.len();
     let mut removed_messages = 0usize;
     let mut already_trashed_messages = 0usize;
     let mut failed_remove_messages = 0usize;
+    let mut progress = ProgressBar::new("Trash", total_removals);
     let mut in_flight = JoinSet::new();
     let mut pending_iter = pending_remove_ids.into_iter();
 
@@ -328,40 +333,32 @@ async fn trash_staged_messages(
                     persist_state(state_path, state)?;
 
                     removed_messages += 1;
-                    if removed_messages == 1
-                        || removed_messages == state.message_ids.len()
-                        || removed_messages % 25 == 0
-                    {
-                        println!("Trashed {removed_messages} messages");
-                    }
                 }
                 TrashOutcome::AlreadyTrashed(message_id) => {
                     state.already_trashed_message_ids.insert(message_id);
                     persist_state(state_path, state)?;
 
                     already_trashed_messages += 1;
-                    if already_trashed_messages == 1 || already_trashed_messages % 25 == 0 {
-                        println!(
-                            "Skipped {already_trashed_messages} messages already in Gmail trash"
-                        );
-                    }
                 }
             },
             Ok(Err(error)) => {
                 failed_remove_messages += 1;
-                eprintln!("Skipping Gmail remove failure: {error:#}");
+                progress.log_line(&format!("Skipping Gmail remove failure: {error:#}"));
             }
             Err(error) => {
                 failed_remove_messages += 1;
-                eprintln!("Skipping Gmail remove task panic: {error}");
+                progress.log_line(&format!("Skipping Gmail remove task panic: {error}"));
             }
         }
+
+        progress.inc(1);
 
         if let Some(message_id) = pending_iter.next() {
             spawn_trash_task(&mut in_flight, gmail_client.clone(), message_id);
         }
     }
 
+    progress.finish();
     Ok((
         removed_messages,
         already_trashed_messages,
@@ -449,6 +446,7 @@ fn create_zip_from_staged_files(
     let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
 
     println!("Building zip from staged files in {}.", work_dir.display());
+    let mut progress = ProgressBar::new("Pack", state.message_ids.len());
 
     for (index, message_id) in state.message_ids.iter().enumerate() {
         let staged_path = staged_message_path(messages_dir, message_id);
@@ -480,10 +478,8 @@ fn create_zip_from_staged_files(
             .write_all(&buffer)
             .context("Failed to write the message into the zip file")?;
 
-        let current = index + 1;
-        if current == 1 || current == state.message_ids.len() || current % 25 == 0 {
-            println!("Packed {current} / {}", state.message_ids.len());
-        }
+        let _current = index + 1;
+        progress.inc(1);
     }
 
     archive
@@ -496,6 +492,7 @@ fn create_zip_from_staged_files(
     archive
         .finish()
         .context("Failed to finalize the zip file")?;
+    progress.finish();
     Ok(())
 }
 
@@ -673,4 +670,118 @@ struct DownloadedMessage {
 enum TrashOutcome {
     Trashed(String),
     AlreadyTrashed(String),
+}
+
+struct ProgressBar {
+    label: &'static str,
+    total: usize,
+    current: usize,
+    interactive: bool,
+    finished: bool,
+    last_render_len: usize,
+}
+
+impl ProgressBar {
+    fn new(label: &'static str, total: usize) -> Self {
+        let mut progress = Self {
+            label,
+            total,
+            current: 0,
+            interactive: io::stderr().is_terminal(),
+            finished: false,
+            last_render_len: 0,
+        };
+        progress.draw();
+        progress
+    }
+
+    fn inc(&mut self, delta: usize) {
+        self.current = self.current.saturating_add(delta).min(self.total);
+        self.draw();
+    }
+
+    fn log_line(&mut self, message: &str) {
+        if self.interactive {
+            self.clear();
+        }
+        eprintln!("{message}");
+        if self.interactive {
+            self.draw();
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.finished {
+            return;
+        }
+
+        self.current = self.total;
+        if self.interactive {
+            self.draw();
+            eprintln!();
+        } else if self.total > 0 {
+            eprintln!("{} {}/{}", self.label, self.current, self.total);
+        }
+        self.finished = true;
+    }
+
+    fn draw(&mut self) {
+        if self.finished || self.total == 0 {
+            return;
+        }
+
+        if self.interactive {
+            let line = self.render_line();
+            self.last_render_len = line.len();
+            eprint!("\r{line}");
+            let _ = io::stderr().flush();
+            return;
+        }
+
+        if self.current == 1 || self.current == self.total || self.current % 25 == 0 {
+            eprintln!("{} {}/{}", self.label, self.current, self.total);
+        }
+    }
+
+    fn clear(&mut self) {
+        if !self.interactive || self.last_render_len == 0 {
+            return;
+        }
+
+        eprint!("\r{:<width$}\r", "", width = self.last_render_len);
+        let _ = io::stderr().flush();
+    }
+
+    fn render_line(&self) -> String {
+        const BAR_WIDTH: usize = 28;
+
+        let filled = if self.total == 0 {
+            BAR_WIDTH
+        } else {
+            self.current.saturating_mul(BAR_WIDTH) / self.total
+        };
+        let percent = if self.total == 0 {
+            100
+        } else {
+            self.current.saturating_mul(100) / self.total
+        };
+
+        format!(
+            "{:<8} [{}{}] {}/{} {:>3}%",
+            self.label,
+            "#".repeat(filled),
+            "-".repeat(BAR_WIDTH - filled),
+            self.current,
+            self.total,
+            percent
+        )
+    }
+}
+
+impl Drop for ProgressBar {
+    fn drop(&mut self) {
+        if self.interactive && !self.finished && self.last_render_len > 0 {
+            eprintln!();
+        }
+    }
 }
