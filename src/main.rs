@@ -5,6 +5,7 @@ mod gmail;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, TimeZone};
 use clap::Parser;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -38,6 +39,13 @@ struct Args {
         help = "Output zip file. Defaults to archives/gmail-<year>.zip"
     )]
     output: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Working directory for resumable downloads. Defaults to .gmail-archiver-work/<year>-<hash>"
+    )]
+    work_dir: Option<PathBuf>,
 
     #[arg(
         long,
@@ -125,6 +133,9 @@ async fn run() -> Result<()> {
         .output
         .unwrap_or_else(|| PathBuf::from("archives").join(format!("gmail-{}.zip", args.year)));
     let token_store = args.token_store.unwrap_or_else(default_token_store_path);
+    let work_dir = args
+        .work_dir
+        .unwrap_or_else(|| default_work_dir_path(args.year, &query, args.include_spam_trash));
 
     println!(
         "Time range: {} to {}",
@@ -132,6 +143,7 @@ async fn run() -> Result<()> {
         year_window.end_local.to_rfc3339()
     );
     println!("Gmail query: {query}");
+    println!("Work directory: {}", work_dir.display());
 
     let http_client = auth::build_http_client()?;
     let authenticator = auth::Authenticator::from_client_secret_file(
@@ -142,21 +154,25 @@ async fn run() -> Result<()> {
     let mut gmail_client =
         gmail::GmailClient::new(http_client, authenticator, args.include_spam_trash);
 
-    let message_ids = gmail_client.list_message_ids(&query, page_size).await?;
-    println!("Matched messages: {}", message_ids.len());
-
-    archive::write_archive(
+    let summary = archive::write_archive(
         &mut gmail_client,
-        args.year,
-        &query,
-        year_window.start_local.to_rfc3339(),
-        year_window.end_local.to_rfc3339(),
-        output_path.as_path(),
-        &message_ids,
+        archive::ArchiveRequest {
+            year: args.year,
+            query,
+            start_local: year_window.start_local.to_rfc3339(),
+            end_local: year_window.end_local.to_rfc3339(),
+            output_path,
+            work_dir,
+            page_size,
+            include_spam_trash: args.include_spam_trash,
+        },
     )
     .await?;
 
-    println!("Wrote archive: {}", output_path.display());
+    println!("Matched messages: {}", summary.message_count);
+    println!("Reused staged messages: {}", summary.reused_messages);
+    println!("Downloaded messages: {}", summary.downloaded_messages);
+    println!("Wrote archive: {}", summary.output_path.display());
     Ok(())
 }
 
@@ -166,4 +182,25 @@ fn default_token_store_path() -> PathBuf {
     }
 
     PathBuf::from(".gmail-archiver").join("token.json")
+}
+
+fn default_work_dir_path(year: i32, query: &str, include_spam_trash: bool) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(year.to_string().as_bytes());
+    hasher.update(b"\n");
+    hasher.update(query.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(if include_spam_trash {
+        "true".as_bytes()
+    } else {
+        "false".as_bytes()
+    });
+
+    let digest = hasher.finalize();
+    let hash = digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    PathBuf::from(".gmail-archiver-work").join(format!("{year}-{hash}"))
 }

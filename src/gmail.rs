@@ -80,15 +80,7 @@ impl GmailClient {
                 .context("The Gmail API response did not contain a raw message body")?,
         )?;
 
-        Ok(RawMessage {
-            id: message.id,
-            internal_date_ms: message
-                .internal_date
-                .as_deref()
-                .map(parse_i64)
-                .transpose()?,
-            raw,
-        })
+        Ok(RawMessage { raw })
     }
 
     async fn get_json<T>(&mut self, url: Url) -> Result<T>
@@ -125,8 +117,6 @@ impl GmailClient {
 }
 
 pub struct RawMessage {
-    pub id: String,
-    pub internal_date_ms: Option<i64>,
     pub raw: Vec<u8>,
 }
 
@@ -146,10 +136,7 @@ struct MessageId {
 
 #[derive(Debug, Deserialize)]
 struct RawMessageResponse {
-    id: String,
     raw: Option<String>,
-    #[serde(rename = "internalDate")]
-    internal_date: Option<String>,
 }
 
 fn bool_as_google(value: bool) -> &'static str {
@@ -160,9 +147,4 @@ fn decode_gmail_base64(encoded: &str) -> Result<Vec<u8>> {
     URL_SAFE
         .decode(encoded)
         .context("Failed to decode the Gmail raw message from Base64URL")
-}
-
-fn parse_i64(raw: &str) -> Result<i64> {
-    raw.parse::<i64>()
-        .with_context(|| format!("Could not parse an integer value: {raw}"))
 }

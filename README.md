@@ -8,6 +8,7 @@
 - Filters messages by year with a Gmail query
 - Downloads `raw` messages from the Gmail API
 - Writes `messages/*.eml` plus `manifest.json` into a zip archive
+- Can resume an interrupted export from a local work directory
 
 ## Prerequisites
 
@@ -59,17 +60,33 @@ cargo run -- --year 2024 `
   --token-store .\.gmail-archiver\token.json
 ```
 
+Customize the resumable work directory:
+
+```powershell
+cargo run -- --year 2024 `
+  --work-dir .\.gmail-archiver-work\2024-main
+```
+
 Exclude spam and trash:
 
 ```powershell
 cargo run -- --year 2024 --include-spam-trash false
 ```
 
+Resume after interruption:
+
+```powershell
+cargo run -- --year 2024
+```
+
+Run the same command again after `Ctrl+C`, a crash, or a network error. The tool keeps staged `.eml` files and continues from the remaining messages.
+
 ## Output
 
 - `archives/gmail-<year>.zip`
 - `messages/*.eml` inside the zip
 - `manifest.json` inside the zip
+- `.gmail-archiver-work/<year>-<hash>/` while the export is in progress or available for resume
 
 ## Notes
 
@@ -78,6 +95,8 @@ cargo run -- --year 2024 --include-spam-trash false
 - Message listing uses `users.messages.list`.
 - Message download uses `users.messages.get(format=raw)`.
 - The tool requests the `https://www.googleapis.com/auth/gmail.readonly` scope.
+- Resume state is stored in `state.json`, and each message is staged as `messages/<message-id>.eml` before the final zip is built.
+- Resuming reuses a staged `.eml` only when its SHA-256 matches the hash saved in `state.json`.
 
 ## Caveats
 
