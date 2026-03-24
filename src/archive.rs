@@ -74,7 +74,8 @@ pub async fn write_archive(
         println!("No staged messages found, starting a fresh download.");
     }
 
-    let (reused_messages, pending_download_ids) = verify_staged_messages(&state, &messages_dir)?;
+    let (reused_messages, pending_download_ids) =
+        verify_staged_messages(&state, &messages_dir, request.concurrency).await?;
     let downloaded_messages = download_missing_messages(
         gmail_client,
         &request,
@@ -181,51 +182,84 @@ async fn load_or_create_state(
     Ok(state)
 }
 
-fn verify_staged_messages(
+async fn verify_staged_messages(
     state: &ArchiveState,
     messages_dir: &Path,
+    concurrency: usize,
 ) -> Result<(usize, Vec<String>)> {
     let mut reused_messages = 0usize;
-    let mut pending_download_ids = Vec::new();
+    let mut pending_download_entries = Vec::new();
     let mut progress = ProgressBar::new("Verify", state.message_ids.len());
+    let mut verify_tasks = Vec::new();
 
-    for message_id in &state.message_ids {
+    for (index, message_id) in state.message_ids.iter().enumerate() {
         let staged_path = staged_message_path(messages_dir, message_id);
         if !staged_path.exists() {
-            pending_download_ids.push(message_id.clone());
+            pending_download_entries.push((index, message_id.clone()));
             progress.inc(1);
             continue;
         }
 
         match state.message_sha256.get(message_id) {
             Some(expected_hash) => {
-                let actual_hash = sha256_hex_for_file(&staged_path).with_context(|| {
-                    format!(
-                        "Failed to hash the staged message file: {}",
-                        staged_path.display()
-                    )
-                })?;
-                if actual_hash == *expected_hash {
-                    reused_messages += 1;
-                } else {
-                    progress.log_line(&format!(
-                        "Hash mismatch for staged message {}, redownloading it.",
-                        staged_path.display()
-                    ));
-                    pending_download_ids.push(message_id.clone());
-                }
+                verify_tasks.push(VerifyTask {
+                    index,
+                    message_id: message_id.clone(),
+                    expected_hash: expected_hash.clone(),
+                    staged_path,
+                });
             }
             None => {
                 progress.log_line(&format!(
                     "Staged message {} has no saved hash, redownloading it.",
                     staged_path.display()
                 ));
-                pending_download_ids.push(message_id.clone());
+                pending_download_entries.push((index, message_id.clone()));
+                progress.inc(1);
+            }
+        }
+    }
+
+    let mut in_flight = JoinSet::new();
+    let mut pending_iter = verify_tasks.into_iter();
+
+    while in_flight.len() < concurrency {
+        if let Some(task) = pending_iter.next() {
+            spawn_verify_task(&mut in_flight, task);
+        } else {
+            break;
+        }
+    }
+
+    while let Some(join_result) = in_flight.join_next().await {
+        let outcome = join_result
+            .context("A staged message verify task panicked")?
+            .with_context(|| "A staged message verify task failed")?;
+
+        match outcome.status {
+            VerificationStatus::Reused => {
+                reused_messages += 1;
+            }
+            VerificationStatus::NeedsDownload(log_message) => {
+                if let Some(log_message) = log_message {
+                    progress.log_line(&log_message);
+                }
+                pending_download_entries.push((outcome.index, outcome.message_id));
             }
         }
 
         progress.inc(1);
+
+        if let Some(task) = pending_iter.next() {
+            spawn_verify_task(&mut in_flight, task);
+        }
     }
+
+    pending_download_entries.sort_by_key(|(index, _)| *index);
+    let pending_download_ids = pending_download_entries
+        .into_iter()
+        .map(|(_, message_id)| message_id)
+        .collect();
 
     progress.finish();
     Ok((reused_messages, pending_download_ids))
@@ -383,6 +417,34 @@ fn spawn_download_task(
             message_id,
             raw: message.raw,
             sha256,
+        })
+    });
+}
+
+fn spawn_verify_task(join_set: &mut JoinSet<Result<VerificationOutcome>>, task: VerifyTask) {
+    join_set.spawn_blocking(move || {
+        let actual_hash = sha256_hex_for_file(&task.staged_path).with_context(|| {
+            format!(
+                "Failed to hash the staged message file: {}",
+                task.staged_path.display()
+            )
+        })?;
+
+        if actual_hash == task.expected_hash {
+            return Ok(VerificationOutcome {
+                index: task.index,
+                message_id: task.message_id,
+                status: VerificationStatus::Reused,
+            });
+        }
+
+        Ok(VerificationOutcome {
+            index: task.index,
+            message_id: task.message_id,
+            status: VerificationStatus::NeedsDownload(Some(format!(
+                "Hash mismatch for staged message {}, redownloading it.",
+                task.staged_path.display()
+            ))),
         })
     });
 }
@@ -666,6 +728,24 @@ struct DownloadedMessage {
     message_id: String,
     raw: Vec<u8>,
     sha256: String,
+}
+
+struct VerifyTask {
+    index: usize,
+    message_id: String,
+    expected_hash: String,
+    staged_path: PathBuf,
+}
+
+struct VerificationOutcome {
+    index: usize,
+    message_id: String,
+    status: VerificationStatus,
+}
+
+enum VerificationStatus {
+    Reused,
+    NeedsDownload(Option<String>),
 }
 
 enum TrashOutcome {

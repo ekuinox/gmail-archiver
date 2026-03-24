@@ -134,6 +134,7 @@ Run the same command again after `Ctrl+C`, a crash, or a network error. The tool
 - Message listing uses `users.messages.list`.
 - Message download uses `users.messages.get(format=raw)`.
 - Downloads run in parallel, with `--concurrency 8` by default.
+- Resume verification of staged `.eml` files also runs in parallel, using the same `--concurrency` limit.
 - The tool requests the `https://www.googleapis.com/auth/gmail.readonly` scope.
 - `--remove` upgrades the OAuth scope to `https://www.googleapis.com/auth/gmail.modify` and moves messages to Gmail trash, not permanent deletion.
 - Resume state is stored in `state.json`, and each message is staged as `messages/<message-id>.eml` before the final zip is built.
