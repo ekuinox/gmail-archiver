@@ -172,6 +172,7 @@ async fn load_or_create_state(
         remove_after_stage: request.remove_after_stage,
         message_ids,
         message_sha256: BTreeMap::new(),
+        message_label_ids: BTreeMap::new(),
         removed_message_ids: BTreeSet::new(),
         already_trashed_message_ids: BTreeSet::new(),
         created_at: Utc::now().to_rfc3339(),
@@ -300,6 +301,9 @@ async fn download_missing_messages(
         state
             .message_sha256
             .insert(downloaded.message_id.clone(), downloaded.sha256);
+        state
+            .message_label_ids
+            .insert(downloaded.message_id.clone(), downloaded.label_ids);
         persist_state(state_path, state)?;
         write_atomic(&staged_path, &downloaded.raw).with_context(|| {
             format!(
@@ -354,7 +358,13 @@ async fn trash_staged_messages(
 
     while in_flight.len() < request.concurrency {
         if let Some(message_id) = pending_iter.next() {
-            spawn_trash_task(&mut in_flight, gmail_client.clone(), message_id);
+            let known_label_ids = state.message_label_ids.get(&message_id).cloned();
+            spawn_trash_task(
+                &mut in_flight,
+                gmail_client.clone(),
+                message_id,
+                known_label_ids,
+            );
         } else {
             break;
         }
@@ -363,14 +373,22 @@ async fn trash_staged_messages(
     while let Some(join_result) = in_flight.join_next().await {
         match join_result {
             Ok(Ok(outcome)) => match outcome {
-                TrashOutcome::Trashed(message_id) => {
-                    state.removed_message_ids.insert(message_id);
+                TrashOutcome::Trashed {
+                    message_id,
+                    label_ids,
+                } => {
+                    state.removed_message_ids.insert(message_id.clone());
+                    state.message_label_ids.insert(message_id, label_ids);
                     persist_state(state_path, state)?;
 
                     removed_messages += 1;
                 }
-                TrashOutcome::AlreadyTrashed(message_id) => {
-                    state.already_trashed_message_ids.insert(message_id);
+                TrashOutcome::AlreadyTrashed {
+                    message_id,
+                    label_ids,
+                } => {
+                    state.already_trashed_message_ids.insert(message_id.clone());
+                    state.message_label_ids.insert(message_id, label_ids);
                     persist_state(state_path, state)?;
 
                     already_trashed_messages += 1;
@@ -389,7 +407,13 @@ async fn trash_staged_messages(
         progress.inc(1);
 
         if let Some(message_id) = pending_iter.next() {
-            spawn_trash_task(&mut in_flight, gmail_client.clone(), message_id);
+            let known_label_ids = state.message_label_ids.get(&message_id).cloned();
+            spawn_trash_task(
+                &mut in_flight,
+                gmail_client.clone(),
+                message_id,
+                known_label_ids,
+            );
         }
     }
 
@@ -417,6 +441,7 @@ fn spawn_download_task(
             message_id,
             raw: message.raw,
             sha256,
+            label_ids: message.label_ids,
         })
     });
 }
@@ -453,22 +478,34 @@ fn spawn_trash_task(
     join_set: &mut JoinSet<Result<TrashOutcome>>,
     gmail_client: GmailClient,
     message_id: String,
+    known_label_ids: Option<Vec<String>>,
 ) {
     join_set.spawn(async move {
-        let label_ids = gmail_client
-            .get_message_labels(&message_id)
-            .await
-            .with_context(|| format!("Failed to read Gmail labels for message: {message_id}"))?;
+        let label_ids = match known_label_ids {
+            Some(label_ids) => label_ids,
+            None => gmail_client
+                .get_message_labels(&message_id)
+                .await
+                .with_context(|| {
+                    format!("Failed to read Gmail labels for message: {message_id}")
+                })?,
+        };
 
         if label_ids.iter().any(|label_id| label_id == "TRASH") {
-            return Ok(TrashOutcome::AlreadyTrashed(message_id));
+            return Ok(TrashOutcome::AlreadyTrashed {
+                message_id,
+                label_ids,
+            });
         }
 
         gmail_client
             .trash_message(&message_id)
             .await
             .with_context(|| format!("Failed to move the message to Gmail trash: {message_id}"))?;
-        Ok(TrashOutcome::Trashed(message_id))
+        Ok(TrashOutcome::Trashed {
+            message_id,
+            label_ids,
+        })
     });
 }
 
@@ -682,6 +719,8 @@ struct ArchiveState {
     #[serde(default)]
     message_sha256: BTreeMap<String, String>,
     #[serde(default)]
+    message_label_ids: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
     removed_message_ids: BTreeSet<String>,
     #[serde(default)]
     already_trashed_message_ids: BTreeSet<String>,
@@ -728,6 +767,7 @@ struct DownloadedMessage {
     message_id: String,
     raw: Vec<u8>,
     sha256: String,
+    label_ids: Vec<String>,
 }
 
 struct VerifyTask {
@@ -749,8 +789,14 @@ enum VerificationStatus {
 }
 
 enum TrashOutcome {
-    Trashed(String),
-    AlreadyTrashed(String),
+    Trashed {
+        message_id: String,
+        label_ids: Vec<String>,
+    },
+    AlreadyTrashed {
+        message_id: String,
+        label_ids: Vec<String>,
+    },
 }
 
 struct ProgressBar {

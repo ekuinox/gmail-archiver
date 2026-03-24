@@ -91,7 +91,10 @@ impl GmailClient {
                 .context("The Gmail API response did not contain a raw message body")?,
         )?;
 
-        Ok(RawMessage { raw })
+        Ok(RawMessage {
+            raw,
+            label_ids: message.label_ids.unwrap_or_default(),
+        })
     }
 
     pub async fn trash_message(&self, message_id: &str) -> Result<()> {
@@ -228,6 +231,7 @@ impl GmailClient {
 
 pub struct RawMessage {
     pub raw: Vec<u8>,
+    pub label_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -247,6 +251,8 @@ struct MessageId {
 #[derive(Debug, Deserialize)]
 struct RawMessageResponse {
     raw: Option<String>,
+    #[serde(rename = "labelIds")]
+    label_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]

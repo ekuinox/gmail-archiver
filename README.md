@@ -141,6 +141,7 @@ cargo run -- --year 2024
 - 再開状態は `state.json` に保存され、各メッセージは最終 zip 作成前に `messages/<message-id>.eml` としてステージされます。
 - staged `.eml` を再利用するのは、`state.json` に保存された SHA-256 と一致した場合だけです。
 - `--remove` 有効時は、すでにゴミ箱へ移動済みのメッセージ状態も記録し、再開時に続きから処理できます。
+- 新しくダウンロードしたメッセージは `labelIds` も `state.json` に保存し、削除時はそれを再利用します。古い `state.json` にラベル情報が無い場合だけ、削除時に Gmail API から取得します。
 - Gmail の trash API を呼ぶ前に `TRASH` ラベルを確認し、すでにゴミ箱にあるメールはできるだけスキップします。
 - Gmail の trash が失敗したメールはログを出していったんスキップし、`state.json` 上は未完了のまま残すので次回再試行されます。
 
