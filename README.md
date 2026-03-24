@@ -114,6 +114,8 @@ Run the same command again after `Ctrl+C`, a crash, or a network error. The tool
 - Resume state is stored in `state.json`, and each message is staged as `messages/<message-id>.eml` before the final zip is built.
 - Resuming reuses a staged `.eml` only when its SHA-256 matches the hash saved in `state.json`.
 - When `--remove` is enabled, the tool remembers which staged messages have already been moved to trash and continues that work after resume.
+- Before calling the Gmail trash API, the tool checks whether a message already has the `TRASH` label and skips it when possible.
+- If a Gmail trash request fails, the tool logs the error, skips that message for now, and continues the archive. The message is retried on the next run because it is not marked as removed in `state.json`.
 
 ## Caveats
 

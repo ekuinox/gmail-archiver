@@ -32,6 +32,8 @@ pub struct ArchiveSummary {
     pub reused_messages: usize,
     pub downloaded_messages: usize,
     pub removed_messages: usize,
+    pub already_trashed_messages: usize,
+    pub failed_remove_messages: usize,
     pub output_path: PathBuf,
 }
 
@@ -81,14 +83,15 @@ pub async fn write_archive(
         pending_download_ids,
     )
     .await?;
-    let removed_messages = trash_staged_messages(
-        gmail_client,
-        &request,
-        &state_path,
-        &mut state,
-        &messages_dir,
-    )
-    .await?;
+    let (removed_messages, already_trashed_messages, failed_remove_messages) =
+        trash_staged_messages(
+            gmail_client,
+            &request,
+            &state_path,
+            &mut state,
+            &messages_dir,
+        )
+        .await?;
 
     let manifest = ArchiveManifest::from_state(&state);
     let manifest_json =
@@ -127,6 +130,8 @@ pub async fn write_archive(
         reused_messages,
         downloaded_messages,
         removed_messages,
+        already_trashed_messages,
+        failed_remove_messages,
         output_path: request.output_path,
     })
 }
@@ -166,6 +171,7 @@ async fn load_or_create_state(
         message_ids,
         message_sha256: BTreeMap::new(),
         removed_message_ids: BTreeSet::new(),
+        already_trashed_message_ids: BTreeSet::new(),
         created_at: Utc::now().to_rfc3339(),
     };
 
@@ -282,24 +288,27 @@ async fn trash_staged_messages(
     state_path: &Path,
     state: &mut ArchiveState,
     messages_dir: &Path,
-) -> Result<usize> {
+) -> Result<(usize, usize, usize)> {
     if !request.remove_after_stage {
-        return Ok(0);
+        return Ok((0, 0, 0));
     }
 
     let pending_remove_ids = state
         .message_ids
         .iter()
         .filter(|message_id| !state.removed_message_ids.contains(*message_id))
+        .filter(|message_id| !state.already_trashed_message_ids.contains(*message_id))
         .filter(|message_id| staged_message_path(messages_dir, message_id).exists())
         .cloned()
         .collect::<Vec<_>>();
 
     if pending_remove_ids.is_empty() {
-        return Ok(0);
+        return Ok((0, 0, 0));
     }
 
     let mut removed_messages = 0usize;
+    let mut already_trashed_messages = 0usize;
+    let mut failed_remove_messages = 0usize;
     let mut in_flight = JoinSet::new();
     let mut pending_iter = pending_remove_ids.into_iter();
 
@@ -312,19 +321,40 @@ async fn trash_staged_messages(
     }
 
     while let Some(join_result) = in_flight.join_next().await {
-        let message_id = join_result
-            .context("A Gmail trash task panicked")?
-            .with_context(|| "A Gmail trash task failed")?;
+        match join_result {
+            Ok(Ok(outcome)) => match outcome {
+                TrashOutcome::Trashed(message_id) => {
+                    state.removed_message_ids.insert(message_id);
+                    persist_state(state_path, state)?;
 
-        state.removed_message_ids.insert(message_id);
-        persist_state(state_path, state)?;
+                    removed_messages += 1;
+                    if removed_messages == 1
+                        || removed_messages == state.message_ids.len()
+                        || removed_messages % 25 == 0
+                    {
+                        println!("Trashed {removed_messages} messages");
+                    }
+                }
+                TrashOutcome::AlreadyTrashed(message_id) => {
+                    state.already_trashed_message_ids.insert(message_id);
+                    persist_state(state_path, state)?;
 
-        removed_messages += 1;
-        if removed_messages == 1
-            || removed_messages == state.message_ids.len()
-            || removed_messages % 25 == 0
-        {
-            println!("Trashed {removed_messages} messages");
+                    already_trashed_messages += 1;
+                    if already_trashed_messages == 1 || already_trashed_messages % 25 == 0 {
+                        println!(
+                            "Skipped {already_trashed_messages} messages already in Gmail trash"
+                        );
+                    }
+                }
+            },
+            Ok(Err(error)) => {
+                failed_remove_messages += 1;
+                eprintln!("Skipping Gmail remove failure: {error:#}");
+            }
+            Err(error) => {
+                failed_remove_messages += 1;
+                eprintln!("Skipping Gmail remove task panic: {error}");
+            }
         }
 
         if let Some(message_id) = pending_iter.next() {
@@ -332,7 +362,11 @@ async fn trash_staged_messages(
         }
     }
 
-    Ok(removed_messages)
+    Ok((
+        removed_messages,
+        already_trashed_messages,
+        failed_remove_messages,
+    ))
 }
 
 fn spawn_download_task(
@@ -356,16 +390,25 @@ fn spawn_download_task(
 }
 
 fn spawn_trash_task(
-    join_set: &mut JoinSet<Result<String>>,
+    join_set: &mut JoinSet<Result<TrashOutcome>>,
     gmail_client: GmailClient,
     message_id: String,
 ) {
     join_set.spawn(async move {
+        let label_ids = gmail_client
+            .get_message_labels(&message_id)
+            .await
+            .with_context(|| format!("Failed to read Gmail labels for message: {message_id}"))?;
+
+        if label_ids.iter().any(|label_id| label_id == "TRASH") {
+            return Ok(TrashOutcome::AlreadyTrashed(message_id));
+        }
+
         gmail_client
             .trash_message(&message_id)
             .await
             .with_context(|| format!("Failed to move the message to Gmail trash: {message_id}"))?;
-        Ok(message_id)
+        Ok(TrashOutcome::Trashed(message_id))
     });
 }
 
@@ -580,6 +623,8 @@ struct ArchiveState {
     message_sha256: BTreeMap<String, String>,
     #[serde(default)]
     removed_message_ids: BTreeSet<String>,
+    #[serde(default)]
+    already_trashed_message_ids: BTreeSet<String>,
     created_at: String,
 }
 
@@ -623,4 +668,9 @@ struct DownloadedMessage {
     message_id: String,
     raw: Vec<u8>,
     sha256: String,
+}
+
+enum TrashOutcome {
+    Trashed(String),
+    AlreadyTrashed(String),
 }

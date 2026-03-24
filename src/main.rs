@@ -198,6 +198,14 @@ async fn run() -> Result<()> {
     println!("Reused staged messages: {}", summary.reused_messages);
     println!("Downloaded messages: {}", summary.downloaded_messages);
     println!("Trashed messages: {}", summary.removed_messages);
+    println!(
+        "Already in Gmail trash: {}",
+        summary.already_trashed_messages
+    );
+    println!(
+        "Failed Gmail trash attempts: {}",
+        summary.failed_remove_messages
+    );
     println!("Wrote archive: {}", summary.output_path.display());
     Ok(())
 }

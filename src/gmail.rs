@@ -95,6 +95,17 @@ impl GmailClient {
         self.post_empty(url).await
     }
 
+    pub async fn get_message_labels(&self, message_id: &str) -> Result<Vec<String>> {
+        let mut url = Url::parse(&format!(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}"
+        ))
+        .context("Failed to build the Gmail messages.get URL")?;
+        url.query_pairs_mut().append_pair("format", "minimal");
+
+        let message: MinimalMessageResponse = self.get_json(url).await?;
+        Ok(message.label_ids.unwrap_or_default())
+    }
+
     async fn get_json<T>(&self, url: Url) -> Result<T>
     where
         T: DeserializeOwned,
@@ -184,6 +195,12 @@ struct MessageId {
 #[derive(Debug, Deserialize)]
 struct RawMessageResponse {
     raw: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MinimalMessageResponse {
+    #[serde(rename = "labelIds")]
+    label_ids: Option<Vec<String>>,
 }
 
 fn bool_as_google(value: bool) -> &'static str {
