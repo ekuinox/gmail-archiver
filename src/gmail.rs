@@ -7,7 +7,7 @@ use reqwest::{
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use std::sync::Arc;
+use std::{error::Error as StdError, io, sync::Arc};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 use url::Url;
@@ -270,7 +270,26 @@ fn should_retry_status(status: StatusCode) -> bool {
 }
 
 fn should_retry_transport_error(error: &reqwest::Error) -> bool {
-    error.is_timeout() || error.is_connect()
+    error.is_timeout() || error.is_connect() || has_retryable_io_source(error)
+}
+
+fn has_retryable_io_source(error: &(dyn StdError + 'static)) -> bool {
+    let mut source = Some(error);
+
+    while let Some(err) = source {
+        if let Some(io_error) = err.downcast_ref::<io::Error>()
+            && matches!(
+                io_error.kind(),
+                io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+            )
+        {
+            return true;
+        }
+
+        source = err.source();
+    }
+
+    false
 }
 
 fn retry_delay(attempt: usize, headers: Option<&HeaderMap>) -> Duration {
@@ -294,4 +313,55 @@ fn decode_gmail_base64(encoded: &str) -> Result<Vec<u8>> {
     URL_SAFE
         .decode(encoded)
         .context("Failed to decode the Gmail raw message from Base64URL")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_retryable_io_source;
+    use std::error::Error as StdError;
+    use std::fmt;
+    use std::io;
+
+    #[derive(Debug)]
+    struct WrappedError {
+        source: Box<dyn StdError + Send + Sync>,
+    }
+
+    impl fmt::Display for WrappedError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "wrapped error")
+        }
+    }
+
+    impl StdError for WrappedError {
+        fn source(&self) -> Option<&(dyn StdError + 'static)> {
+            Some(self.source.as_ref())
+        }
+    }
+
+    #[test]
+    fn retries_on_connection_reset_in_source_chain() {
+        let error = WrappedError {
+            source: Box::new(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "connection reset by peer",
+            )),
+        };
+
+        assert!(has_retryable_io_source(&error));
+    }
+
+    #[test]
+    fn retries_on_connection_aborted_error() {
+        let error = io::Error::new(io::ErrorKind::ConnectionAborted, "connection aborted");
+
+        assert!(has_retryable_io_source(&error));
+    }
+
+    #[test]
+    fn does_not_retry_on_unrelated_io_error() {
+        let error = io::Error::new(io::ErrorKind::InvalidData, "invalid data");
+
+        assert!(!has_retryable_io_source(&error));
+    }
 }
